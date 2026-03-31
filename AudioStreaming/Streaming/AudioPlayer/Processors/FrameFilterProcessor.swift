@@ -120,31 +120,53 @@ final class FrameFilterProcessor: NSObject, FrameFiltering {
     }
 
     public func remove(entry: FilterEntry) {
-        lock.lock(); defer { lock.unlock() }
-        guard let entryIndex = entries.firstIndex(where: { $0 == entry }) else {
-            return
+        var shouldRemoveTap = false
+        lock.lock()
+        if let entryIndex = entries.firstIndex(where: { $0 == entry }) {
+            entries.remove(at: entryIndex)
+            if entries.isEmpty && hasInstalledTap {
+                hasInstalledTap = false
+                shouldRemoveTap = true
+            }
         }
-        entries.remove(at: entryIndex)
-        if entries.isEmpty {
+        lock.unlock()
+        // removeTap must happen outside the lock because AVFAudio's
+        // removeTap(onBus:) synchronously fires the tap callback during
+        // teardown, which re-enters hasEntries and would deadlock on
+        // the non-recursive UnfairLock.
+        if shouldRemoveTap {
             removeTap()
         }
     }
 
     public func remove(entry named: String) {
-        lock.lock(); defer { lock.unlock() }
-        guard let entryIndex = entries.firstIndex(where: { $0.name == named }) else {
-            return
+        var shouldRemoveTap = false
+        lock.lock()
+        if let entryIndex = entries.firstIndex(where: { $0.name == named }) {
+            entries.remove(at: entryIndex)
+            if entries.isEmpty && hasInstalledTap {
+                hasInstalledTap = false
+                shouldRemoveTap = true
+            }
         }
-        entries.remove(at: entryIndex)
-        if entries.isEmpty {
+        lock.unlock()
+        if shouldRemoveTap {
             removeTap()
         }
     }
 
     public func removeAll() {
-        lock.lock(); defer { lock.unlock() }
+        var shouldRemoveTap = false
+        lock.lock()
         entries.removeAll()
-        removeTap()
+        if hasInstalledTap {
+            hasInstalledTap = false
+            shouldRemoveTap = true
+        }
+        lock.unlock()
+        if shouldRemoveTap {
+            removeTap()
+        }
     }
 
     private func process(buffer: AVAudioPCMBuffer, when: AVAudioTime) {
@@ -170,7 +192,9 @@ final class FrameFilterProcessor: NSObject, FrameFiltering {
     }
 
     private func removeTap() {
-        hasInstalledTap = false
+        // Note: hasInstalledTap is now set to false by callers under the lock
+        // before calling this method outside the lock, to prevent the
+        // re-entrant deadlock with AVFAudio's synchronous tap callback.
         mixerNode.removeTap(onBus: 0)
     }
 }
