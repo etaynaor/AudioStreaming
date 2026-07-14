@@ -32,6 +32,7 @@ final class OggVorbisStreamProcessor {
     private let playerContext: AudioPlayerContext
     private let rendererContext: AudioRendererContext
     private let outputAudioFormat: AudioStreamBasicDescription
+    private let decodedAudioFilterProcessor: DecodedAudioFilterProcessor
     
     private let vfDecoder = VorbisFileDecoder()
     private var isInitialized = false
@@ -59,10 +60,12 @@ final class OggVorbisStreamProcessor {
     ///   - outputAudioFormat: The output audio format
     init(playerContext: AudioPlayerContext,
          rendererContext: AudioRendererContext,
-         outputAudioFormat: AudioStreamBasicDescription) {
+         outputAudioFormat: AudioStreamBasicDescription,
+         decodedAudioFilterProcessor: DecodedAudioFilterProcessor) {
         self.playerContext = playerContext
         self.rendererContext = rendererContext
         self.outputAudioFormat = outputAudioFormat
+        self.decodedAudioFilterProcessor = decodedAudioFilterProcessor
     }
     
     deinit {
@@ -404,6 +407,10 @@ final class OggVorbisStreamProcessor {
         // Calculate actual space available
         let actualFramesLeft = totalFrameCount - currentUsed
         let framesToCopy = min(UInt32(outputBuffer.frameLength), actualFramesLeft)
+        outputBuffer.frameLength = framesToCopy
+        if decodedAudioFilterProcessor.hasEntries {
+            decodedAudioFilterProcessor.process(buffer: outputBuffer)
+        }
         
         guard let sourceData = outputBuffer.audioBufferList.pointee.mBuffers.mData?.assumingMemoryBound(to: UInt8.self) else { return }
         let bytesPerFrame = Int(rendererContext.bufferContext.sizeInBytes)

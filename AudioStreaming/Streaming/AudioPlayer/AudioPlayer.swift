@@ -145,6 +145,13 @@ open class AudioPlayer {
         frameFilterProcessor
     }
 
+    /// Observes canonical PCM frames after decoding and before they become
+    /// eligible for playback. This is intended for lightweight pre-playback
+    /// analysis that must not add another buffering phase.
+    public var decodedAudioFiltering: DecodedAudioFiltering {
+        decodedAudioFilterProcessor
+    }
+
     /// An `AVAudioFormat` object for the canonical audio stream
     private var outputAudioFormat: AVAudioFormat = .init(commonFormat: .pcmFormatFloat32, sampleRate: 44100.0, channels: 2, interleaved: true)!
 
@@ -168,6 +175,7 @@ open class AudioPlayer {
     private let fileStreamProcessor: AudioFileStreamProcessor
     private let playerRenderProcessor: AudioPlayerRenderProcessor
     private let frameFilterProcessor: FrameFilterProcessor
+    private let decodedAudioFilterProcessor: DecodedAudioFilterProcessor
 
     private let serializationQueue: DispatchQueue
     public let sourceQueue: DispatchQueue
@@ -200,10 +208,14 @@ open class AudioPlayer {
             outputAudioFormat: outputAudioFormat
         )
 
+        let decodedAudioFilterProcessor = DecodedAudioFilterProcessor()
+        self.decodedAudioFilterProcessor = decodedAudioFilterProcessor
+
         fileStreamProcessor = AudioFileStreamProcessor(
             playerContext: playerContext,
             rendererContext: rendererContext,
-            outputAudioFormat: outputAudioFormat.basicStreamDescription
+            outputAudioFormat: outputAudioFormat.basicStreamDescription,
+            decodedAudioFilterProcessor: decodedAudioFilterProcessor
         )
 
         playerRenderProcessor = AudioPlayerRenderProcessor(

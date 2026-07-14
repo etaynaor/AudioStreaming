@@ -35,12 +35,14 @@ final class AudioFileStreamProcessor {
     private let playerContext: AudioPlayerContext
     private let rendererContext: AudioRendererContext
     private let outputAudioFormat: AudioStreamBasicDescription
+    private let decodedAudioFilterProcessor: DecodedAudioFilterProcessor
     
     // Add Ogg Vorbis processor
     private lazy var oggVorbisProcessor = OggVorbisStreamProcessor(
         playerContext: playerContext,
         rendererContext: rendererContext,
-        outputAudioFormat: outputAudioFormat
+        outputAudioFormat: outputAudioFormat,
+        decodedAudioFilterProcessor: decodedAudioFilterProcessor
     )
 
     var audioFileStream: AudioFileStreamID?
@@ -60,11 +62,13 @@ final class AudioFileStreamProcessor {
 
     init(playerContext: AudioPlayerContext,
          rendererContext: AudioRendererContext,
-         outputAudioFormat: AudioStreamBasicDescription)
+         outputAudioFormat: AudioStreamBasicDescription,
+         decodedAudioFilterProcessor: DecodedAudioFilterProcessor)
     {
         self.playerContext = playerContext
         self.rendererContext = rendererContext
         self.outputAudioFormat = outputAudioFormat
+        self.decodedAudioFilterProcessor = decodedAudioFilterProcessor
         
         // Set up Ogg Vorbis processor callback
         oggVorbisProcessor.processorCallback = { [weak self] effect in
@@ -584,12 +588,20 @@ final class AudioFileStreamProcessor {
                 framesAdded = framesToDecode
 
                 if status == AudioConvertStatus.done.rawValue {
+                    processDecodedFrames(
+                        bufferList: localBufferList,
+                        frameCount: framesToDecode
+                    )
                     fillUsedFrames(framesCount: framesAdded)
                     return
                 } else if status != 0 {
                     fileStreamCallback?(.raiseError(.codecError))
                     return
                 }
+                processDecodedFrames(
+                    bufferList: localBufferList,
+                    frameCount: framesToDecode
+                )
 
                 framesToDecode = start
                 if framesToDecode == 0 {
@@ -614,9 +626,17 @@ final class AudioFileStreamProcessor {
                 framesAdded += framesToDecode
 
                 if status == AudioConvertStatus.done.rawValue {
+                    processDecodedFrames(
+                        bufferList: localBufferList,
+                        frameCount: framesToDecode
+                    )
                     fillUsedFrames(framesCount: framesAdded)
                     return
                 } else if status == AudioConvertStatus.processed.rawValue {
+                    processDecodedFrames(
+                        bufferList: localBufferList,
+                        frameCount: framesToDecode
+                    )
                     fillUsedFrames(framesCount: framesAdded)
                     continue packetProcess
                 } else if status != 0 {
@@ -645,9 +665,17 @@ final class AudioFileStreamProcessor {
 
                 framesAdded = framesToDecode
                 if status == AudioConvertStatus.done.rawValue {
+                    processDecodedFrames(
+                        bufferList: localBufferList,
+                        frameCount: framesToDecode
+                    )
                     fillUsedFrames(framesCount: framesAdded)
                     return
                 } else if status == AudioConvertStatus.processed.rawValue {
+                    processDecodedFrames(
+                        bufferList: localBufferList,
+                        frameCount: framesToDecode
+                    )
                     fillUsedFrames(framesCount: framesAdded)
                     continue packetProcess
                 } else if status != 0 {
@@ -674,6 +702,30 @@ final class AudioFileStreamProcessor {
         }
         bufferList[0].mDataByteSize = framesToDecode * rendererContext.bufferContext.sizeInBytes
         bufferList[0].mNumberChannels = rendererContext.audioBuffer.mNumberChannels
+    }
+
+    /// Delivers decoded canonical PCM before advancing the ring-buffer count.
+    /// Once `fillUsedFrames` runs, the render side may begin consuming the
+    /// startup buffer, so pre-playback analysis must happen first.
+    private func processDecodedFrames(
+        bufferList: UnsafeMutableAudioBufferListPointer,
+        frameCount: UInt32
+    ) {
+        guard frameCount > 0, decodedAudioFilterProcessor.hasEntries else {
+            return
+        }
+        bufferList[0].mDataByteSize = frameCount * rendererContext.bufferContext.sizeInBytes
+        var streamDescription = outputAudioFormat
+        guard let format = AVAudioFormat(streamDescription: &streamDescription),
+              let buffer = AVAudioPCMBuffer(
+                pcmFormat: format,
+                bufferListNoCopy: bufferList.unsafeMutablePointer,
+                deallocator: nil
+              ) else {
+            return
+        }
+        buffer.frameLength = frameCount
+        decodedAudioFilterProcessor.process(buffer: buffer)
     }
 
     /// Advances the processed frames for buffer and reading entry
