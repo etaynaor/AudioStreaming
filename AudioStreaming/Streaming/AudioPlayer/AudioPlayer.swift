@@ -236,6 +236,12 @@ open class AudioPlayer {
     }
 
     deinit {
+        // The output Audio Unit pulls from `playerRenderProcessor`, which in
+        // turn reads `rendererContext` on its realtime I/O thread. Quiesce and
+        // detach that render path before freeing the context's buffers.
+        stopRendering()
+        player.auAudioUnit.outputProvider = nil
+        playerRenderProcessor.renderBlock = nil
         playerContext.audioPlayingEntry?.close()
         clearQueue()
         rendererContext.clean()
@@ -696,12 +702,24 @@ open class AudioPlayer {
     ///
     /// - parameter reason: A value of `AudioPlayerStopReason` indicating the reason the engine stopped.
     private func stopEngine(reason: AudioPlayerStopReason) {
-        audioEngine.stop()
-        player.auAudioUnit.stopHardware()
+        stopRendering()
         rendererContext.resetBuffers()
         playerContext.setInternalState(to: .stopped)
         playerContext.stopReason.write { $0 = reason }
         Logger.debug("engine stopped 🛑", category: .generic)
+    }
+
+    /// Stops the output unit that pulls the manual-rendering block and releases
+    /// its render resources before the backing engine or renderer context can
+    /// be torn down. Render callbacks remain attached so a later `play` can
+    /// allocate the resources again; final callback detachment happens only in
+    /// `deinit`.
+    private func stopRendering() {
+        if player.auAudioUnit.renderResourcesAllocated {
+            player.auAudioUnit.stopHardware()
+            player.auAudioUnit.deallocateRenderResources()
+        }
+        audioEngine.stop()
     }
 
     /// Starts the audio player, resetting the buffers if requested
