@@ -39,8 +39,11 @@ final class DispatchTimerSource {
     deinit {
         timer.setEventHandler(handler: nil)
         timer.cancel()
-        // balance called of cancel/resume to avoid crashes
-        timer.resume()
+        // A suspended source must be resumed before release. An active source
+        // is already balanced; resuming it again traps in libdispatch.
+        if state == .suspended {
+            timer.resume()
+        }
     }
 
     /// Adds an event handler to the timer.

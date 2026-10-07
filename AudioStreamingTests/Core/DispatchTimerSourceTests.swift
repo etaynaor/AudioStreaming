@@ -24,6 +24,27 @@ class DispatchTimerSourceTests: XCTestCase {
         timerSource = nil
     }
 
+    func test_Teardown_While_Activated_Does_Not_Over_Resume() {
+        timerSource?.activate()
+        weak var releasedSource = timerSource
+        timerSource = nil
+        XCTAssertNil(releasedSource)
+    }
+
+    func test_Teardown_While_Suspended_Balances_The_Source() {
+        timerSource?.activate()
+        timerSource?.suspend()
+        weak var releasedSource = timerSource
+        timerSource = nil
+        XCTAssertNil(releasedSource)
+    }
+
+    func test_Teardown_Before_First_Activation_Balances_The_Source() {
+        weak var releasedSource = timerSource
+        timerSource = nil
+        XCTAssertNil(releasedSource)
+    }
+
     func test_DispatchTimerSource_Can_Be_Activated_and_Suspended() {
         // starts deactivated
         XCTAssertFalse(timerSource!.isRunning)
