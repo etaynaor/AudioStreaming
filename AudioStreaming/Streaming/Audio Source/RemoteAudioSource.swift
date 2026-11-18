@@ -59,6 +59,21 @@ public class RemoteAudioSource: AudioStreamSource {
     var waitingForNetwork = false
     let retrierTimeout: Retrier
 
+    /// Whether the current connection has delivered any audio bytes.
+    private var receivedDataOnCurrentConnection = false
+    /// When the current connection was opened.
+    private var currentConnectionOpenedAt: DispatchTime?
+    /// Reconnects in a row that happened on connections which died young.
+    /// Bounds the immediate-reconnect path so a server that keeps dropping
+    /// us falls back to the retrier's backoff (and, for clean ends, to EOF).
+    private var rapidReconnectCount = 0
+
+    /// A connection that lived at least this long counts as healthy, so its
+    /// loss is reconnected immediately instead of after the retrier's delay.
+    var healthyConnectionSeconds: Double = 10
+    /// How many short-lived connections in a row may still be reconnected.
+    var maxRapidReconnects = 3
+
     init(networking: NetworkingClient,
          metadataStreamSource: MetadataStreamSource,
          icycastHeadersProcessor: IcycastHeadersProcessor,
@@ -183,9 +198,10 @@ public class RemoteAudioSource: AudioStreamSource {
         netStatusService.start { [weak self] connection in
             guard let self = self else { return }
             guard connection.isConnected else { return }
-            if self.waitingForNetwork {
-                self.seek(at: self.supportsSeek ? self.position : 0)
+            self.underlyingQueue.async { [weak self] in
+                guard let self = self, self.waitingForNetwork else { return }
                 self.waitingForNetwork = false
+                self.reconnect()
             }
         }
     }
@@ -211,6 +227,8 @@ public class RemoteAudioSource: AudioStreamSource {
     }
 
     private func doPerfomOpen(seek seekOffset: Int) {
+        receivedDataOnCurrentConnection = false
+        currentConnectionOpenedAt = .now()
         let urlRequest = buildUrlRequest(with: url, seekIfNeeded: seekOffset)
         streamRequest = networkingClient.stream(request: urlRequest)
             .responseStream { [weak self] event in
@@ -274,6 +292,12 @@ public class RemoteAudioSource: AudioStreamSource {
             } else if let pendingHTTPError {
                 self.pendingHTTPError = nil
                 delegate?.errorOccurred(source: self, error: NetworkError.serverError(pendingHTTPError))
+            } else if isLiveStream, canReconnectAfterConnectionEnded() {
+                // A live stream has no end: the server or a middlebox closed the
+                // connection (for example during a Wi-Fi to cellular handover).
+                // Reopen it and keep playing the already decoded audio instead of
+                // ending the entry, which would stop playback once the buffer drains.
+                reconnectAfterConnectionLoss()
             } else {
                 addCompletionOperation { [weak self] in
                     guard let self = self else { return }
@@ -297,6 +321,9 @@ public class RemoteAudioSource: AudioStreamSource {
         guard let audioData = response.data else {
             delegate?.errorOccurred(source: self, error: NetworkError.missingData)
             return
+        }
+        if !audioData.isEmpty {
+            receivedDataOnCurrentConnection = true
         }
         addStreamOperation { [weak self] in
             guard let self = self else { return }
@@ -325,7 +352,65 @@ public class RemoteAudioSource: AudioStreamSource {
             return
         }
         waitingForNetwork = false
-        retryOnError()
+        reconnectAfterConnectionLoss()
+    }
+
+    /// A stream without a known length and without byte-range support: an
+    /// Icecast/Shoutcast style live broadcast rather than a finite file.
+    private var isLiveStream: Bool {
+        guard let header = parsedHeaderOutput else { return true }
+        return header.fileLength <= 0 && !supportsSeek && !header.isMp4
+    }
+
+    private var currentConnectionWasHealthy: Bool {
+        guard receivedDataOnCurrentConnection, let openedAt = currentConnectionOpenedAt else { return false }
+        let elapsed = Double(DispatchTime.now().uptimeNanoseconds - openedAt.uptimeNanoseconds) / 1_000_000_000
+        return elapsed >= healthyConnectionSeconds
+    }
+
+    private func canReconnectAfterConnectionEnded() -> Bool {
+        guard receivedDataOnCurrentConnection else { return false }
+        return currentConnectionWasHealthy || rapidReconnectCount < maxRapidReconnects
+    }
+
+    /// Reopens the stream after the connection failed or a live stream ended.
+    ///
+    /// A connection that had been delivering audio for a while is reopened at
+    /// once: decoded audio is still playing, and every moment spent waiting eats
+    /// into that cushion. Short-lived connections use the retrier's backoff.
+    private func reconnectAfterConnectionLoss() {
+        if currentConnectionWasHealthy {
+            rapidReconnectCount = 0
+            retrierTimeout.cancel()
+            reconnect()
+        } else if receivedDataOnCurrentConnection, rapidReconnectCount < maxRapidReconnects {
+            rapidReconnectCount += 1
+            retrierTimeout.cancel()
+            reconnect()
+        } else {
+            retryOnError()
+        }
+    }
+
+    /// Opens a fresh connection for the same source.
+    ///
+    /// When the response headers are already known for a plain (non-MP4)
+    /// stream from the start, the extra probe request that a first open makes
+    /// is skipped: it would add a full connection setup before audio flows again.
+    private func reconnect() {
+        let offset = supportsSeek ? position : 0
+        guard offset == 0, let header = parsedHeaderOutput, !header.isMp4 else {
+            seek(at: offset)
+            return
+        }
+        close()
+        relativePosition = 0
+        seekOffset = 0
+        pendingHTTPError = nil
+        metadataStreamProcessor.reset()
+        icycastHeadersProcessor.reset()
+        shouldTryParsingIcycastHeaders = false
+        doPerfomOpen(seek: 0)
     }
 
     /// Processing audio data, extracting metadata if needed.
@@ -446,7 +531,9 @@ public class RemoteAudioSource: AudioStreamSource {
     private func retryOnError() {
         retrierTimeout.retry { [weak self] in
             guard let self = self else { return }
-            self.seek(at: self.supportsSeek ? self.position : 0)
+            self.underlyingQueue.async { [weak self] in
+                self?.reconnect()
+            }
         }
     }
 
